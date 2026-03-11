@@ -8,7 +8,7 @@ import time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -164,9 +164,18 @@ def _fetch_firestore_id_token() -> str:
     return id_token
 
 
-def _firestore_headers() -> dict[str, str]:
+def _extract_bearer_token(auth_header: str) -> str:
+    value = auth_header.strip()
+    if not value:
+        return ""
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value
+
+
+def _firestore_headers(auth_token: str = "") -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    token = _fetch_firestore_id_token()
+    token = auth_token.strip() or _fetch_firestore_id_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
@@ -259,12 +268,16 @@ def _from_firestore_document(document: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
-def _get_document(collection_path: str, doc_id: str) -> dict[str, Any]:
+def _get_document(
+    collection_path: str,
+    doc_id: str,
+    auth_token: str = "",
+) -> dict[str, Any]:
     url = f"{_firestore_root()}/documents/{collection_path}/{doc_id}"
     response = requests.get(
         url,
         params={"key": _firestore_web_api_key()},
-        headers=_firestore_headers(),
+        headers=_firestore_headers(auth_token),
         timeout=20,
     )
     if response.status_code == 404:
@@ -281,6 +294,7 @@ def _list_documents(
     collection_path: str,
     page_size: int = 200,
     max_documents: int = 1000,
+    auth_token: str = "",
 ) -> list[dict[str, Any]]:
     url = f"{_firestore_root()}/documents/{collection_path}"
     documents: list[dict[str, Any]] = []
@@ -297,7 +311,7 @@ def _list_documents(
         response = requests.get(
             url,
             params=params,
-            headers=_firestore_headers(),
+            headers=_firestore_headers(auth_token),
             timeout=30,
         )
         if response.status_code == 404:
@@ -318,7 +332,12 @@ def _list_documents(
     return documents
 
 
-def _upsert_document(collection_path: str, doc_id: str, data: dict[str, Any]) -> None:
+def _upsert_document(
+    collection_path: str,
+    doc_id: str,
+    data: dict[str, Any],
+    auth_token: str = "",
+) -> None:
     url = (
         f"{_firestore_root()}/documents/{collection_path}/{doc_id}"
         f"?key={_firestore_web_api_key()}"
@@ -326,7 +345,7 @@ def _upsert_document(collection_path: str, doc_id: str, data: dict[str, Any]) ->
     response = requests.patch(
         url,
         json=_to_firestore_document(data),
-        headers=_firestore_headers(),
+        headers=_firestore_headers(auth_token),
         timeout=20,
     )
     if response.status_code not in (200, 201):
@@ -336,12 +355,16 @@ def _upsert_document(collection_path: str, doc_id: str, data: dict[str, Any]) ->
         )
 
 
-def _add_document(collection_path: str, data: dict[str, Any]) -> None:
+def _add_document(
+    collection_path: str,
+    data: dict[str, Any],
+    auth_token: str = "",
+) -> None:
     url = f"{_firestore_root()}/documents/{collection_path}?key={_firestore_web_api_key()}"
     response = requests.post(
         url,
         json=_to_firestore_document(data),
-        headers=_firestore_headers(),
+        headers=_firestore_headers(auth_token),
         timeout=20,
     )
     if response.status_code not in (200, 201):
@@ -663,14 +686,22 @@ def _build_digest_text(
     return "\n".join(lines)
 
 
-def _load_digest_jobs(config: dict[str, Any]) -> list[dict[str, Any]]:
+def _load_digest_jobs(
+    config: dict[str, Any],
+    auth_token: str = "",
+) -> list[dict[str, Any]]:
     if config.get("includeJobs") is False:
         return []
 
     lookback_days = int(config.get("jobLookbackDays") or 7)
     max_items = int(config.get("maxItems") or 6)
     threshold = _now_utc() - timedelta(days=lookback_days)
-    documents = _list_documents("jobs", page_size=200, max_documents=400)
+    documents = _list_documents(
+        "jobs",
+        page_size=200,
+        max_documents=400,
+        auth_token=auth_token,
+    )
 
     rows = []
     for job in documents:
@@ -691,14 +722,22 @@ def _load_digest_jobs(config: dict[str, Any]) -> list[dict[str, Any]]:
     return rows[:max_items]
 
 
-def _load_digest_hackathons(config: dict[str, Any]) -> list[dict[str, Any]]:
+def _load_digest_hackathons(
+    config: dict[str, Any],
+    auth_token: str = "",
+) -> list[dict[str, Any]]:
     if config.get("includeHackathons") is False:
         return []
 
     lookback_days = int(config.get("hackathonLookbackDays") or 10)
     max_items = int(config.get("maxItems") or 6)
     threshold = _now_utc() - timedelta(days=lookback_days)
-    documents = _list_documents("hackathons", page_size=200, max_documents=400)
+    documents = _list_documents(
+        "hackathons",
+        page_size=200,
+        max_documents=400,
+        auth_token=auth_token,
+    )
 
     rows = []
     for hackathon in documents:
@@ -728,8 +767,16 @@ def _load_digest_hackathons(config: dict[str, Any]) -> list[dict[str, Any]]:
     return rows[:max_items]
 
 
-def _load_digest_recipients(config: dict[str, Any]) -> list[dict[str, Any]]:
-    documents = _list_documents("users", page_size=250, max_documents=5000)
+def _load_digest_recipients(
+    config: dict[str, Any],
+    auth_token: str = "",
+) -> list[dict[str, Any]]:
+    documents = _list_documents(
+        "users",
+        page_size=250,
+        max_documents=5000,
+        auth_token=auth_token,
+    )
     recipients = []
     for user in documents:
         if _normalize_key(user.get("status")) != "active":
@@ -887,20 +934,28 @@ async def send_custom_email(request: CustomEmailRequest):
 
 
 @app.post("/send-daily-digest")
-async def send_daily_digest(request: DailyDigestRequest):
-    time_zone = request.timezone or DEFAULT_DIGEST_TIMEZONE
+async def send_daily_digest(
+    payload: DailyDigestRequest,
+    request: Request,
+):
+    auth_token = _extract_bearer_token(request.headers.get("Authorization", ""))
+    time_zone = payload.timezone or DEFAULT_DIGEST_TIMEZONE
     run_key = _format_run_key(time_zone)
-    run_doc_id = run_key if not request.test_email else f"{run_key}-test"
+    run_doc_id = run_key if not payload.test_email else f"{run_key}-test"
     started_at = _now_utc()
 
     try:
-        existing_run = _get_document("digest_runs", run_doc_id)
+        existing_run = _get_document(
+            "digest_runs",
+            run_doc_id,
+            auth_token=auth_token,
+        )
         if (
             existing_run
             and existing_run.get("status") == "completed"
-            and not request.force
-            and not request.test_email
-            and not request.dry_run
+            and not payload.force
+            and not payload.test_email
+            and not payload.dry_run
         ):
             return {
                 "status": "skipped",
@@ -911,7 +966,11 @@ async def send_daily_digest(request: DailyDigestRequest):
 
         config = {
             **_default_digest_config(),
-            **_get_document("system_config", "daily_digest"),
+            **_get_document(
+                "system_config",
+                "daily_digest",
+                auth_token=auth_token,
+            ),
         }
         config["deliveryProvider"] = "render_backend"
         config["deliveryTimezone"] = time_zone
@@ -923,8 +982,8 @@ async def send_daily_digest(request: DailyDigestRequest):
 
         if (
             not _is_true(config.get("enabled"))
-            and not request.ignore_disabled
-            and not request.test_email
+            and not payload.ignore_disabled
+            and not payload.test_email
         ):
             _upsert_document(
                 "digest_runs",
@@ -933,10 +992,11 @@ async def send_daily_digest(request: DailyDigestRequest):
                     "status": "skipped",
                     "reason": "disabled",
                     "finishedAt": _now_utc(),
-                    "triggeredBy": request.triggered_by or "render_api",
+                    "triggeredBy": payload.triggered_by or "render_api",
                     "deliveryProvider": "render_backend",
                     "timeZone": time_zone,
                 },
+                auth_token=auth_token,
             )
             return {
                 "status": "skipped",
@@ -944,21 +1004,21 @@ async def send_daily_digest(request: DailyDigestRequest):
                 "runKey": run_doc_id,
             }
 
-        jobs = _load_digest_jobs(config)
-        hackathons = _load_digest_hackathons(config)
-        recipients = _load_digest_recipients(config)
+        jobs = _load_digest_jobs(config, auth_token=auth_token)
+        hackathons = _load_digest_hackathons(config, auth_token=auth_token)
+        recipients = _load_digest_recipients(config, auth_token=auth_token)
 
-        if request.test_email:
+        if payload.test_email:
             recipients = [
                 {
-                    "email": request.test_email,
+                    "email": payload.test_email,
                     "name": "Digest Tester",
                     "role": "admin",
                     "doc_id": "digest-test",
                 }
             ]
 
-        if request.dry_run:
+        if payload.dry_run:
             return {
                 "status": "dry_run",
                 "runKey": run_doc_id,
@@ -985,14 +1045,15 @@ async def send_daily_digest(request: DailyDigestRequest):
         _upsert_document(
             "digest_runs",
             run_doc_id,
-            {
-                "status": "running",
-                "startedAt": started_at,
-                "triggeredBy": request.triggered_by or "render_api",
-                "deliveryProvider": "render_backend",
-                "timeZone": time_zone,
-            },
-        )
+                {
+                    "status": "running",
+                    "startedAt": started_at,
+                    "triggeredBy": payload.triggered_by or "render_api",
+                    "deliveryProvider": "render_backend",
+                    "timeZone": time_zone,
+                },
+                auth_token=auth_token,
+            )
 
         if not jobs and not hackathons:
             _upsert_document(
@@ -1002,10 +1063,11 @@ async def send_daily_digest(request: DailyDigestRequest):
                     "status": "skipped",
                     "reason": "no_content",
                     "finishedAt": _now_utc(),
-                    "triggeredBy": request.triggered_by or "render_api",
+                    "triggeredBy": payload.triggered_by or "render_api",
                     "deliveryProvider": "render_backend",
                     "timeZone": time_zone,
                 },
+                auth_token=auth_token,
             )
             return {
                 "status": "skipped",
@@ -1021,10 +1083,11 @@ async def send_daily_digest(request: DailyDigestRequest):
                     "status": "skipped",
                     "reason": "no_recipients",
                     "finishedAt": _now_utc(),
-                    "triggeredBy": request.triggered_by or "render_api",
+                    "triggeredBy": payload.triggered_by or "render_api",
                     "deliveryProvider": "render_backend",
                     "timeZone": time_zone,
                 },
+                auth_token=auth_token,
             )
             return {
                 "status": "skipped",
@@ -1062,7 +1125,7 @@ async def send_daily_digest(request: DailyDigestRequest):
                 "status": status,
                 "startedAt": started_at,
                 "finishedAt": finished_at,
-                "triggeredBy": request.triggered_by or "render_api",
+                "triggeredBy": payload.triggered_by or "render_api",
                 "deliveryProvider": "render_backend",
                 "timeZone": time_zone,
                 "totalRecipients": len(recipients),
@@ -1073,6 +1136,7 @@ async def send_daily_digest(request: DailyDigestRequest):
                 "sampleErrors": failed[:20],
                 "subject": subject,
             },
+            auth_token=auth_token,
         )
 
         try:
@@ -1089,6 +1153,7 @@ async def send_daily_digest(request: DailyDigestRequest):
                     "recipientCount": sent_count,
                     "deliveryProvider": "render_backend",
                 },
+                auth_token=auth_token,
             )
         except Exception:
             pass
@@ -1111,10 +1176,11 @@ async def send_daily_digest(request: DailyDigestRequest):
                     "status": "failed",
                     "error": str(exc),
                     "finishedAt": _now_utc(),
-                    "triggeredBy": request.triggered_by or "render_api",
+                    "triggeredBy": payload.triggered_by or "render_api",
                     "deliveryProvider": "render_backend",
                     "timeZone": time_zone,
                 },
+                auth_token=auth_token,
             )
         except Exception:
             pass
