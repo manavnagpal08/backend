@@ -1,4 +1,14 @@
 fastapi
 uvicorn
-python-multipart
 requests
+python-multipart
+pdfplumber
+nltk
+pydantic
+scikit-learn
+pandas
+numpy
+sentence-transformers
+pdf2image
+pytesseract
+Pillow
